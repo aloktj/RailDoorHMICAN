@@ -58,6 +58,7 @@ BOOL WINAPI ConsoleHandler(DWORD type) {
 std::string Timestamp() {
     auto now = std::chrono::system_clock::now();
     auto time = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
     std::tm tm_snapshot{};
 #ifdef _WIN32
     localtime_s(&tm_snapshot, &time);
@@ -65,12 +66,17 @@ std::string Timestamp() {
     localtime_r(&time, &tm_snapshot);
 #endif
     std::ostringstream oss;
-    oss << std::put_time(&tm_snapshot, "%H:%M:%S");
+    oss << std::put_time(&tm_snapshot, "%H:%M:%S") << '.' << std::setw(3) << std::setfill('0')
+        << ms.count();
     return oss.str();
 }
 
-void Log(const std::string &message) {
-    std::cout << "[" << Timestamp() << "] " << message << std::endl;
+void Log(const std::string &prefix, const std::string &message) {
+    std::cout << "[" << Timestamp() << "] " << prefix << " " << message << std::endl;
+}
+
+void LogError(const std::string &prefix, const std::string &message) {
+    std::cerr << "[" << Timestamp() << "] " << prefix << " ERROR: " << message << std::endl;
 }
 
 std::string DoorStateToString(DoorState state) {
@@ -85,6 +91,30 @@ std::string DoorStateToString(DoorState state) {
             return "FAULTED";
         default:
             return "UNKNOWN";
+    }
+}
+
+struct RateLimiter {
+    std::chrono::steady_clock::time_point last_log{};
+    size_t suppressed = 0;
+};
+
+void LogRateLimited(const std::string &prefix,
+                    const std::string &message,
+                    RateLimiter &limiter,
+                    std::chrono::milliseconds interval) {
+    auto now = std::chrono::steady_clock::now();
+    if (limiter.last_log.time_since_epoch().count() == 0 ||
+        now - limiter.last_log >= interval) {
+        std::string suffix;
+        if (limiter.suppressed > 0) {
+            suffix = " (" + std::to_string(limiter.suppressed) + " similar errors suppressed)";
+            limiter.suppressed = 0;
+        }
+        Log(prefix, message + suffix);
+        limiter.last_log = now;
+    } else {
+        ++limiter.suppressed;
     }
 }
 
@@ -185,6 +215,7 @@ int main(int argc, char **argv) {
         PrintUsage();
         return kExitFailure;
     }
+    const std::string log_prefix = "HmiApp";
 
 #ifdef _WIN32
     SetConsoleCtrlHandler(ConsoleHandler, TRUE);
@@ -192,7 +223,7 @@ int main(int argc, char **argv) {
 
     uint32_t channel = 0;
     if (!TryParseChannel(config.channel, channel)) {
-        std::cerr << "Invalid channel string: " << config.channel << std::endl;
+        LogError(log_prefix, "Invalid channel string: " + config.channel);
         return kExitFailure;
     }
 
@@ -201,7 +232,7 @@ int main(int argc, char **argv) {
     bool sam = false;
     CANAPI_Return_t rc = CPeakCAN::MapString2Bitrate(config.bitrate.c_str(), bitrate, data, sam);
     if (rc != CANERR_NOERROR) {
-        std::cerr << "Invalid bitrate string: " << config.bitrate << std::endl;
+        LogError(log_prefix, "Invalid bitrate string: " + config.bitrate);
         return kExitFailure;
     }
 
@@ -211,21 +242,27 @@ int main(int argc, char **argv) {
 
     rc = can_api.InitializeChannel(static_cast<int32_t>(channel), op_mode);
     if (rc != CANERR_NOERROR) {
-        std::cerr << "CAN init failed: " << ErrorToString(rc) << std::endl;
+        LogError(log_prefix, "CAN init failed: " + ErrorToString(rc));
+        LogError(log_prefix, "Check that the PCAN driver is installed, the channel is valid, and not already in use.");
         return kExitFailure;
     }
 
     rc = can_api.StartController(bitrate);
     if (rc != CANERR_NOERROR) {
-        std::cerr << "CAN start failed: " << ErrorToString(rc) << std::endl;
+        LogError(log_prefix, "CAN start failed: " + ErrorToString(rc));
+        LogError(log_prefix, "Bitrate mismatch or CAN init failure. Verify the bus is at " + config.bitrate + ".");
         can_api.TeardownChannel();
         return kExitFailure;
     }
 
-    Log("HmiApp started on " + config.channel + " @" + config.bitrate);
+    Log(log_prefix, "CAN init OK on " + config.channel + " @" + config.bitrate);
+    Log(log_prefix, "HmiApp started");
 
     std::mutex door_mutex;
     std::vector<DoorInfo> doors(3);
+    RateLimiter read_limiter;
+    RateLimiter write_limiter;
+    constexpr auto kStaleThreshold = std::chrono::milliseconds(500);
 
     std::thread rx_thread([&]() {
         while (g_running.load()) {
@@ -256,13 +293,16 @@ int main(int argc, char **argv) {
                 door.fault_code = fault;
                 door.last_update = std::chrono::steady_clock::now();
                 if (changed) {
-                    Log("Door " + std::to_string(door_id) + " -> " + DoorStateToString(new_state) +
-                        " obs=" + std::to_string(obstruction) + " fault=" + std::to_string(fault));
+                    Log(log_prefix, "Door " + std::to_string(door_id) + " -> " +
+                                        DoorStateToString(new_state) + " obs=" +
+                                        std::to_string(obstruction) + " fault=" +
+                                        std::to_string(fault));
                 }
             } else if (rc_read == CANERR_RX_EMPTY || rc_read == CANERR_TIMEOUT) {
                 continue;
             } else {
-                Log("CAN read error: " + ErrorToString(rc_read));
+                LogRateLimited(log_prefix, "CAN read error: " + ErrorToString(rc_read), read_limiter,
+                               std::chrono::milliseconds(1000));
             }
         }
     });
@@ -275,13 +315,13 @@ int main(int argc, char **argv) {
                 snapshot = doors;
             }
 
-            std::cout << "\nDoor Status (STALE if >500ms)" << std::endl;
+            std::cout << "\nDoor Status (STALE if >" << kStaleThreshold.count() << "ms)" << std::endl;
             std::cout << "ID  STATE     OBS  FAULT  UPDATED" << std::endl;
             auto now = std::chrono::steady_clock::now();
             for (size_t i = 0; i < snapshot.size(); ++i) {
                 const DoorInfo &info = snapshot[i];
                 bool stale = (info.last_update.time_since_epoch().count() == 0) ||
-                             (now - info.last_update > std::chrono::milliseconds(500));
+                             (now - info.last_update > kStaleThreshold);
                 std::string state = stale ? "STALE" : DoorStateToString(info.state);
                 std::cout << "" << (i + 1) << "   " << std::setw(8) << std::left << state << " "
                           << std::setw(4) << std::left << static_cast<int>(info.obstruction) << " "
@@ -289,14 +329,20 @@ int main(int argc, char **argv) {
                           << (stale ? "-" : "OK") << std::endl;
             }
 
+            // Timing assumption: DoorNode status TX defaults to 100 ms, so a 500 ms
+            // threshold marks a door as STALE after ~5 missed updates.
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
     });
 
     std::thread input_thread([&]() {
+        PrintMenu();
         while (g_running.load()) {
-            PrintMenu();
             std::string line;
+            if (std::cin.rdbuf()->in_avail() == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
             if (!std::getline(std::cin, line)) {
                 g_running = false;
                 break;
@@ -329,11 +375,13 @@ int main(int argc, char **argv) {
             CANAPI_Message_t message = BuildCommandMessage(door_id, cmd);
             CANAPI_Return_t rc_write = can_api.WriteMessage(message, 0U);
             if (rc_write != CANERR_NOERROR) {
-                Log("CAN write error: " + ErrorToString(rc_write));
+                LogRateLimited(log_prefix, "CAN write error: " + ErrorToString(rc_write), write_limiter,
+                               std::chrono::milliseconds(1000));
             } else {
                 std::string cmd_name = (cmd == 1) ? "OPEN" : (cmd == 2) ? "CLOSE" : "RESET_FAULT";
-                Log("Sent " + cmd_name + " to door " + std::to_string(door_id));
+                Log(log_prefix, "Sent " + cmd_name + " to door " + std::to_string(door_id));
             }
+            PrintMenu();
         }
     });
 
@@ -341,7 +389,7 @@ int main(int argc, char **argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    Log("Shutting down...");
+    Log(log_prefix, "Shutting down...");
 
     if (input_thread.joinable()) {
         input_thread.join();
@@ -356,6 +404,6 @@ int main(int argc, char **argv) {
     can_api.ResetController();
     can_api.TeardownChannel();
 
-    Log("Shutdown complete.");
+    Log(log_prefix, "Shutdown complete.");
     return 0;
 }

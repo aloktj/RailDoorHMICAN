@@ -27,6 +27,11 @@
 - ID: `0x102`
 - DATA: `01 00 00 02 00 00 00 00`
 
+### Hex Dump Example
+```
+0x102  [8] 01 00 00 02 00 00 00 00
+```
+
 ## Command Frames (event)
 - Command ID: **0x201**
 
@@ -49,3 +54,8 @@
 ### Example (Reset Door 3 Fault)
 - ID: `0x201`
 - DATA: `03 03 00 00 00 00 00 00`
+
+### Hex Dump Example
+```
+0x201  [8] 03 03 00 00 00 00 00 00
+```

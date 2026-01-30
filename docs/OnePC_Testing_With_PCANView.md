@@ -10,7 +10,10 @@
    ```bat
    scripts\run_doors.bat
    ```
-2. Open **PCAN-View** and connect to `PCAN_USBBUS1` at **500 kbit/s**.
+2. Open **PCAN-View** and connect with:
+   - **Channel**: `PCAN_USBBUS1`
+   - **Bitrate**: `500 kbit/s`
+   - **Message type**: Standard (11-bit)
 3. Confirm you see IDs **0x101**, **0x102**, **0x103** at roughly **100 ms** intervals.
 4. Inspect data bytes to confirm the state encoding and door_id.
 
@@ -24,13 +27,16 @@
    scripts\run_hmi.bat
    ```
 2. In PCAN-View, open the **Transmit** window and add a frame:
-   - ID: `0x101`
-   - Type: Standard
-   - DLC: `8`
-   - DATA: `01 00 00 01 00 00 00 00` (Door 1 OPEN)
+   - **ID**: `0x101`
+   - **Type**: Standard
+   - **DLC**: `8`
+   - **Data**: `01 00 00 01 00 00 00 00` (Door 1 OPEN)
+   - **Send type**: Manual (or Cyclic)
+   - **Period** (if cyclic): `100 ms`
 3. Send the frame repeatedly (or enable periodic transmit).
 4. Confirm HmiApp updates Door 1 to **OPEN**.
 5. Stop transmitting; after ~500 ms HmiApp should show **STALE**.
+   - Note: 500 ms corresponds to ~5 missed updates at the default 100 ms status period.
 
 ## (c) Validate HmiApp TX (Commands)
 1. Use the HmiApp menu to send **OPEN**, **CLOSE**, or **RESET_FAULT**.

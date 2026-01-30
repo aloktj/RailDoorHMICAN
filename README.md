@@ -18,3 +18,35 @@ Phase-1: Direct CAN↔CAN POC on Windows using PEAK PCAN and PCANBasic-Wrapper.
 
 ## Runtime dependency
 Both apps require the PEAK PCAN drivers and the `PCANBasic.dll` runtime from PEAK; do not bundle the DLL in this repo.
+
+## Phase-1 Demo Walkthrough
+### 1-PC testing using PCAN-View
+1. Build the solution (x64 Debug or Release).
+2. Start the DoorNode instances:
+   ```bat
+   scripts\run_doors.bat
+   ```
+3. Open **PCAN-View** and connect to `PCAN_USBBUS1` at **500 kbit/s**.
+4. Confirm you see status frames **0x101..0x103** every ~100 ms.
+5. Start the HMI:
+   ```bat
+   scripts\run_hmi.bat
+   ```
+6. In PCAN-View, transmit a status frame (see `docs/OnePC_Testing_With_PCANView.md`) and verify HmiApp updates the door state.
+7. Use the HmiApp menu to send OPEN/CLOSE/RESET commands and confirm PCAN-View shows `0x201`.
+
+### 2-PC testing (Doors PC + HMI PC)
+1. On the Doors PC, connect PCAN-USB to the CAN bus and build/run:
+   ```bat
+   scripts\run_doors.bat
+   ```
+2. On the HMI PC, connect a second PCAN-USB to the same bus and run:
+   ```bat
+   scripts\run_hmi.bat
+   ```
+3. Verify HmiApp receives status updates and commands appear on the bus.
+
+## Known Limitations (Phase-1)
+- Direct CAN↔CAN only (no TCMS or gateway yet).
+- No redundancy.
+- Console UI only.
