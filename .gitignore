@@ -28,4 +28,4 @@ out/
 # NuGet
 packages/
 # Third-party submodules (kept out of tree in this repo)
-third_party/PCANBasic-Wrapper/
+# third_party/PCANBasic-Wrapper/
